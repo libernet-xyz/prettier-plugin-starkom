@@ -1,6 +1,6 @@
 {
-  "name": "@starkom/prettier-plugin-starkom",
-  "version": "1.0.0",
+  "name": "@libernet/prettier-plugin-starkom",
+  "version": "0.1.0",
   "description": "Prettier plugin for formatting Starkom code.",
   "homepage": "https://github.com/libernet-xyz/prettier-plugin-starkom#readme",
   "bugs": {
@@ -12,7 +12,31 @@
   },
   "license": "Apache-2.0",
   "author": "Alberto La Rocca <alr@libernet.xyz>",
+  "type": "module",
+  "main": "dist/index.js",
+  "exports": "./dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "build": "npx tsc",
+    "test": "NODE_OPTIONS='--import tsx/esm' mocha 'test/*.ts'"
+  },
+  "peerDependencies": {
+    "prettier": ">=3.0.0"
+  },
+  "dependencies": {
+    "@libernet/starkom": "^0.4.0"
+  },
+  "devDependencies": {
+    "@types/chai": "^5.2.3",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^25.9.3",
+    "chai": "^6.2.2",
+    "mocha": "^11.7.6",
+    "prettier": "^3.8.4",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3"
   }
 }

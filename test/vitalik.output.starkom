@@ -1,0 +1,12 @@
+pragma starkom 1.0.0;
+
+template Vitalik() {
+  signal input x;
+  signal square;
+  signal cube;
+  square <== x * x;
+  cube <== square * x;
+  cube + x + 5 === 35;
+}
+
+component main = Vitalik();
