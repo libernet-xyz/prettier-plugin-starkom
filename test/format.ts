@@ -1,6 +1,3 @@
-// Copyright 2026 The Libernet Team
-// SPDX-License-Identifier: Apache-2.0
-
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import * as path from "node:path";

@@ -1,6 +1,6 @@
 {
   "name": "@libernet/prettier-plugin-starkom",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Prettier plugin for formatting Starkom code.",
   "homepage": "https://github.com/libernet-xyz/prettier-plugin-starkom#readme",
   "bugs": {
@@ -27,7 +27,7 @@
     "prettier": ">=3.0.0"
   },
   "dependencies": {
-    "@libernet/starkom": "^0.4.0"
+    "@libernet/starkom": "^0.5.1"
   },
   "devDependencies": {
     "@types/chai": "^5.2.3",
