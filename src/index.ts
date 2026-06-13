@@ -27,6 +27,15 @@ const { hardline, softline, line, group, indent, join, ifBreak } = doc.builders;
 
 // ---- Enum constants (matching proto values) --------------------------------------
 
+const TokenType = ast.Token.Type;
+
+interface Comment {
+  readonly offset: number;
+  readonly endOffset: number;
+  readonly label: string;
+  readonly isLineComment: boolean;
+}
+
 const DeclarationType = ast.DeclarationStatement.Type;
 const DeclarationModifier = ast.DeclarationStatement.Modifier;
 const AssignmentDirection = ast.AssignmentDirection;
@@ -117,6 +126,57 @@ function hasRef(idx: number | null | undefined): boolean {
   return (idx ?? 0) !== 0;
 }
 
+function lineOf(lineStarts: number[], offset: number): number {
+  let low = 0;
+  let high = lineStarts.length - 1;
+  while (low < high) {
+    const mid = (low + high + 1) >> 1;
+    if ((lineStarts[mid] ?? 0) <= offset) {
+      low = mid;
+    } else {
+      high = mid - 1;
+    }
+  }
+  return low;
+}
+
+function hasBlankLineBetweenOffsets(
+  lineStarts: number[],
+  offsetA: number,
+  offsetB: number,
+): boolean {
+  if (!lineStarts || lineStarts.length === 0) {
+    return false;
+  }
+  return lineOf(lineStarts, offsetB) - lineOf(lineStarts, offsetA) >= 2;
+}
+
+function buildComments(file: File): Comment[] {
+  const result: Comment[] = [];
+  for (const tok of file["tokens"] ?? []) {
+    const offset = tok["offset"] ?? 0;
+    const label = tok["label"] ?? "";
+    if (tok["type"] === TokenType.TOKEN_TYPE_SINGLE_LINE_COMMENT) {
+      result.push({ offset, endOffset: offset + label.length + 2, label, isLineComment: true });
+    } else if (tok["type"] === TokenType.TOKEN_TYPE_MULTI_LINE_COMMENT) {
+      result.push({ offset, endOffset: offset + label.length + 4, label, isLineComment: false });
+    }
+  }
+  return result;
+}
+
+function commentsInRange(
+  allComments: Comment[],
+  startOffset: number,
+  endOffset: number,
+): Comment[] {
+  return allComments.filter((c) => c.offset >= startOffset && c.offset < endOffset);
+}
+
+function printComment(comment: Comment): Doc {
+  return comment.isLineComment ? `//${comment.label}` : `/*${comment.label}*/`;
+}
+
 function escapeString(s: string): string {
   return s
     .replace(/\\/g, "\\\\")
@@ -130,10 +190,53 @@ function escapeString(s: string): string {
 // ---- File -----------------------------------------------------------------------
 
 function printFile(file: File): Doc {
+  const comments = buildComments(file);
+  const lineStarts = file["lineStarts"] ?? [];
   const sections: Doc[] = [];
 
+  // Find the byte offset of the pragma keyword (first non-comment token).
+  let pragmaOffset = 0;
+  for (const tok of file["tokens"] ?? []) {
+    const type = tok["type"] ?? 0;
+    if (
+      type !== TokenType.TOKEN_TYPE_SINGLE_LINE_COMMENT &&
+      type !== TokenType.TOKEN_TYPE_MULTI_LINE_COMMENT
+    ) {
+      pragmaOffset = tok["offset"] ?? 0;
+      break;
+    }
+  }
+
   const v = file["version"];
-  sections.push(`pragma starkom ${v?.["major"] ?? 0}.${v?.["minor"] ?? 0}.${v?.["patch"] ?? 0};`);
+  const pragmaDoc: Doc = `pragma starkom ${v?.["major"] ?? 0}.${v?.["minor"] ?? 0}.${v?.["patch"] ?? 0};`;
+
+  // Interleave any leading comments with the pragma using blank-line-aware separators.
+  const preComments = commentsInRange(comments, 0, pragmaOffset);
+  if (preComments.length === 0) {
+    sections.push(pragmaDoc);
+  } else {
+    type FileLevelItem = { doc: Doc; startOffset: number; endOffset: number };
+    const items: FileLevelItem[] = [
+      ...preComments.map((c) => ({
+        doc: printComment(c),
+        startOffset: c.offset,
+        endOffset: c.endOffset,
+      })),
+      { doc: pragmaDoc, startOffset: pragmaOffset, endOffset: pragmaOffset },
+    ];
+    const parts: Doc[] = [items[0]!.doc];
+    for (let i = 1; i < items.length; i++) {
+      const sep: Doc = hasBlankLineBetweenOffsets(
+        lineStarts,
+        items[i - 1]!.endOffset,
+        items[i]!.startOffset,
+      )
+        ? [hardline, hardline]
+        : hardline;
+      parts.push(sep, items[i]!.doc);
+    }
+    sections.push(parts);
+  }
 
   const includes = file["includes"] ?? [];
   if (includes.length > 0) {
@@ -147,9 +250,9 @@ function printFile(file: File): Doc {
 
   for (const def of file["definitions"] ?? []) {
     if (def["templateDefinition"]) {
-      sections.push(printTemplate(file, def["templateDefinition"]));
+      sections.push(printTemplate(file, def["templateDefinition"], comments));
     } else if (def["functionDefinition"]) {
-      sections.push(printFunction(file, def["functionDefinition"]));
+      sections.push(printFunction(file, def["functionDefinition"], comments));
     }
   }
 
@@ -167,23 +270,23 @@ function formatParams(params: string[]): Doc {
   return group(["(", indent([softline, join([",", line], params)]), softline, ")"]);
 }
 
-function printTemplate(file: File, t: TemplateDefinition): Doc {
+function printTemplate(file: File, t: TemplateDefinition, comments: Comment[]): Doc {
   return [
     "template ",
     t["name"] ?? "",
     formatParams(t["params"] ?? []),
     " ",
-    printBlock(file, ref(t["bodyIndex"])),
+    printBlock(file, ref(t["bodyIndex"]), comments),
   ];
 }
 
-function printFunction(file: File, f: FunctionDefinition): Doc {
+function printFunction(file: File, f: FunctionDefinition, comments: Comment[]): Doc {
   return [
     "function ",
     f["name"] ?? "",
     formatParams(f["params"] ?? []),
     " ",
-    printBlock(file, ref(f["bodyIndex"])),
+    printBlock(file, ref(f["bodyIndex"]), comments),
   ];
 }
 
@@ -195,37 +298,73 @@ function printMainComponent(file: File, mc: MainComponent): Doc {
 
 // ---- Statements -----------------------------------------------------------------
 
-function printBlock(file: File, idx: number): Doc {
+function printBlock(file: File, idx: number, comments: Comment[]): Doc {
   const node = mustStatement(file, idx);
   if (node["statement"] !== "block") {
-    return ["{", indent([hardline, printStatement(file, idx)]), hardline, "}"];
+    return ["{", indent([hardline, printStatement(file, idx, comments)]), hardline, "}"];
   }
+
   const statements = node["block"]?.["statements"] ?? [];
-  if (statements.length === 0) {
-    return "{}";
+  const blockRange = node["range"];
+  const blockStart = blockRange ? (blockRange["offset"] ?? 0) : 0;
+  const blockEnd = blockRange ? blockStart + (blockRange["length"] ?? 0) : Infinity;
+  const lineStarts = file["lineStarts"] ?? [];
+
+  type Item =
+    | { kind: "statement"; idx: number; startOffset: number; endOffset: number }
+    | { kind: "comment"; comment: Comment };
+
+  const statementItems: Item[] = statements.map((stmtIdx) => {
+    const stmt = mustStatement(file, stmtIdx);
+    const range = stmt["range"];
+    const startOffset = range ? (range["offset"] ?? 0) : 0;
+    const endOffset = range ? startOffset + (range["length"] ?? 0) : 0;
+    return { kind: "statement" as const, idx: stmtIdx, startOffset, endOffset };
+  });
+
+  const blockComments = commentsInRange(comments, blockStart + 1, blockEnd);
+  const commentItems: Item[] = blockComments.map((c) => ({ kind: "comment" as const, comment: c }));
+
+  const items: Item[] = [...statementItems, ...commentItems].sort((a, b) => {
+    const aOffset = a.kind === "statement" ? a.startOffset : a.comment.offset;
+    const bOffset = b.kind === "statement" ? b.startOffset : b.comment.offset;
+    return aOffset - bOffset;
+  });
+
+  if (items.length === 0) return "{}";
+
+  const itemStartOffset = (item: Item): number =>
+    item.kind === "statement" ? item.startOffset : item.comment.offset;
+  const itemEndOffset = (item: Item): number =>
+    item.kind === "statement" ? item.endOffset : item.comment.endOffset;
+  const printItem = (item: Item): Doc =>
+    item.kind === "statement"
+      ? printStatement(file, item.idx, comments)
+      : printComment(item.comment);
+
+  const body: Doc[] = [printItem(items[0]!)];
+  for (let i = 1; i < items.length; i++) {
+    const separator: Doc = hasBlankLineBetweenOffsets(
+      lineStarts,
+      itemEndOffset(items[i - 1]!),
+      itemStartOffset(items[i]!),
+    )
+      ? [hardline, hardline]
+      : hardline;
+    body.push(separator, printItem(items[i]!));
   }
-  return [
-    "{",
-    indent([
-      hardline,
-      join(
-        hardline,
-        statements.map((i) => printStatement(file, i)),
-      ),
-    ]),
-    hardline,
-    "}",
-  ];
+
+  return ["{", indent([hardline, body]), hardline, "}"];
 }
 
-function printStatement(file: File, idx: number): Doc {
+function printStatement(file: File, idx: number, comments: Comment[]): Doc {
   const node = mustStatement(file, idx);
   switch (node["statement"]) {
     case "empty":
       return ";";
 
     case "block":
-      return printBlock(file, idx);
+      return printBlock(file, idx, comments);
 
     case "declaration":
       return [printDeclarationStatement(file, node["declaration"]!), ";"];
@@ -236,16 +375,16 @@ function printStatement(file: File, idx: number): Doc {
     case "ifStatement": {
       const s = node["ifStatement"]!;
       const head: Doc = ["if (", printExpression(file, ref(s["condition"])), ") "];
-      const then_: Doc = printBlock(file, ref(s["thenBranch"]));
+      const then_: Doc = printBlock(file, ref(s["thenBranch"]), comments);
       if (!hasRef(s["elseBranch"])) {
         return [head, then_];
       }
       const elseNode = mustStatement(file, ref(s["elseBranch"]));
       if (elseNode["statement"] === "ifStatement") {
         // else-if chain: omit braces around the nested if
-        return [head, then_, " else ", printStatement(file, ref(s["elseBranch"]))];
+        return [head, then_, " else ", printStatement(file, ref(s["elseBranch"]), comments)];
       }
-      return [head, then_, " else ", printBlock(file, ref(s["elseBranch"]))];
+      return [head, then_, " else ", printBlock(file, ref(s["elseBranch"]), comments)];
     }
 
     case "whileLoopStatement": {
@@ -254,7 +393,7 @@ function printStatement(file: File, idx: number): Doc {
         "while (",
         printExpression(file, ref(s["condition"])),
         ") ",
-        printBlock(file, ref(s["body"])),
+        printBlock(file, ref(s["body"]), comments),
       ];
     }
 
@@ -262,7 +401,7 @@ function printStatement(file: File, idx: number): Doc {
       const s = node["doWhileLoopStatement"]!;
       return [
         "do ",
-        printBlock(file, ref(s["body"])),
+        printBlock(file, ref(s["body"]), comments),
         " while (",
         printExpression(file, ref(s["condition"])),
         ");",
@@ -274,7 +413,7 @@ function printStatement(file: File, idx: number): Doc {
       const hasCondition = hasRef(s["condition"]);
       const hasStep = hasRef(s["step"]);
       const initializer: Doc = hasRef(s["initializer"])
-        ? printForInit(file, ref(s["initializer"]))
+        ? printForInit(file, ref(s["initializer"]), comments)
         : "";
       const condition: Doc = hasCondition ? [" ", printExpression(file, ref(s["condition"]))] : "";
       const step: Doc = hasStep ? [" ", printExpression(file, ref(s["step"]))] : "";
@@ -286,7 +425,7 @@ function printStatement(file: File, idx: number): Doc {
         ";",
         step,
         ") ",
-        printBlock(file, ref(s["body"])),
+        printBlock(file, ref(s["body"]), comments),
       ];
     }
 
@@ -311,7 +450,7 @@ function printStatement(file: File, idx: number): Doc {
 }
 
 // Prints a for-loop initializer (declaration or expression, without trailing semicolon).
-function printForInit(file: File, idx: number): Doc {
+function printForInit(file: File, idx: number, _comments: Comment[]): Doc {
   const node = mustStatement(file, idx);
   switch (node["statement"]) {
     case "empty":
@@ -396,7 +535,9 @@ function printExpression(file: File, idx: number): Doc {
       const elements = (node["arrayLiteral"]?.["elements"] ?? []).map((i) =>
         printExpression(file, i),
       );
-      if (elements.length === 0) return "[]";
+      if (elements.length === 0) {
+        return "[]";
+      }
       return group([
         "[",
         indent([softline, join([",", line], elements), ifBreak(",", "")]),
@@ -413,7 +554,9 @@ function printExpression(file: File, idx: number): Doc {
 
     case "tuple": {
       const components = node["tuple"]?.["components"] ?? [];
-      if (components.length === 0) return "()";
+      if (components.length === 0) {
+        return "()";
+      }
       if (components.length === 1) {
         // Single-element tuple: (x,) — trailing comma is mandatory.
         return ["(", printExpression(file, components[0]!), ",)"];
@@ -518,7 +661,9 @@ function printPostfix(file: File, operand: Doc, pf: PostfixExpression): Doc {
 
     case "invocation": {
       const args = (pf["invocation"]?.["arguments"] ?? []).map((i) => printExpression(file, i));
-      if (args.length === 0) return [operand, "()"];
+      if (args.length === 0) {
+        return [operand, "()"];
+      }
       return [operand, group(["(", indent([softline, join([",", line], args)]), softline, ")"])];
     }
 
@@ -548,7 +693,10 @@ const plugin: Plugin<File> = {
   parsers: {
     starkom: {
       parse(text, options) {
-        return parse(options["filepath"] ?? "<anonymous>", text, false);
+        return parse(options["filepath"] ?? "<anonymous>", text, {
+          withTokens: true,
+          withRanges: true,
+        });
       },
       astFormat: "starkom",
       locStart: (_node: unknown) => 0,
