@@ -157,7 +157,7 @@ function buildComments(file: File): Comment[] {
     const offset = tok["offset"] ?? 0;
     const label = tok["label"] ?? "";
     if (tok["type"] === TokenType.TOKEN_TYPE_SINGLE_LINE_COMMENT) {
-      result.push({ offset, endOffset: offset + label.length + 3, label, isLineComment: true });
+      result.push({ offset, endOffset: offset + label.length + 2, label, isLineComment: true });
     } else if (tok["type"] === TokenType.TOKEN_TYPE_MULTI_LINE_COMMENT) {
       result.push({ offset, endOffset: offset + label.length + 4, label, isLineComment: false });
     }
@@ -190,10 +190,53 @@ function escapeString(s: string): string {
 // ---- File -----------------------------------------------------------------------
 
 function printFile(file: File): Doc {
+  const comments = buildComments(file);
+  const lineStarts = file["lineStarts"] ?? [];
   const sections: Doc[] = [];
 
+  // Find the byte offset of the pragma keyword (first non-comment token).
+  let pragmaOffset = 0;
+  for (const tok of file["tokens"] ?? []) {
+    const type = tok["type"] ?? 0;
+    if (
+      type !== TokenType.TOKEN_TYPE_SINGLE_LINE_COMMENT &&
+      type !== TokenType.TOKEN_TYPE_MULTI_LINE_COMMENT
+    ) {
+      pragmaOffset = tok["offset"] ?? 0;
+      break;
+    }
+  }
+
   const v = file["version"];
-  sections.push(`pragma starkom ${v?.["major"] ?? 0}.${v?.["minor"] ?? 0}.${v?.["patch"] ?? 0};`);
+  const pragmaDoc: Doc = `pragma starkom ${v?.["major"] ?? 0}.${v?.["minor"] ?? 0}.${v?.["patch"] ?? 0};`;
+
+  // Interleave any leading comments with the pragma using blank-line-aware separators.
+  const preComments = commentsInRange(comments, 0, pragmaOffset);
+  if (preComments.length === 0) {
+    sections.push(pragmaDoc);
+  } else {
+    type FileLevelItem = { doc: Doc; startOffset: number; endOffset: number };
+    const items: FileLevelItem[] = [
+      ...preComments.map((c) => ({
+        doc: printComment(c),
+        startOffset: c.offset,
+        endOffset: c.endOffset,
+      })),
+      { doc: pragmaDoc, startOffset: pragmaOffset, endOffset: pragmaOffset },
+    ];
+    const parts: Doc[] = [items[0]!.doc];
+    for (let i = 1; i < items.length; i++) {
+      const sep: Doc = hasBlankLineBetweenOffsets(
+        lineStarts,
+        items[i - 1]!.endOffset,
+        items[i]!.startOffset,
+      )
+        ? [hardline, hardline]
+        : hardline;
+      parts.push(sep, items[i]!.doc);
+    }
+    sections.push(parts);
+  }
 
   const includes = file["includes"] ?? [];
   if (includes.length > 0) {
@@ -205,7 +248,6 @@ function printFile(file: File): Doc {
     );
   }
 
-  const comments = buildComments(file);
   for (const def of file["definitions"] ?? []) {
     if (def["templateDefinition"]) {
       sections.push(printTemplate(file, def["templateDefinition"], comments));
